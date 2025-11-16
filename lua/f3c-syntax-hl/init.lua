@@ -92,63 +92,73 @@ function M.setup(user_opts)
 	local function highlight_f3c(bufnr)
 		bufnr = bufnr or vim.api.nvim_get_current_buf()
 		vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
-
 		for i, line in ipairs(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)) do
 			local touched = false
 
-			--------------------------------------------------------------------------
-			-- 1) key : value
-			--------------------------------------------------------------------------
-			local key_s, key_e = line:find("^%s*[%w_.-]+%s*:")
-			if key_s then
-				touched = true
-				local key_end = line:find(":") - 1
-				vim.api.nvim_buf_add_highlight(bufnr, ns, "F3CKey", i - 1, key_s - 1, key_end)
+			-- Step 1: highlight quoted strings and track their spans
+			-- Step 1: highlight from first to last double quote on the line
+			local first_quote = line:find('"')
+			local last_quote = line:match('.*()"')
+			if first_quote and last_quote and last_quote > first_quote then
+				vim.api.nvim_buf_add_highlight(bufnr, ns, "F3CString", i - 1, first_quote - 1, last_quote)
+			end
 
-				local raw_val = trim(line:sub(key_end + 2)) -- after ": "
-				if #raw_val > 0 then
-					local hl = classify_value(raw_val)
-					local vcol = line:find(raw_val, key_end + 2, true) - 1
-					vim.api.nvim_buf_add_highlight(bufnr, ns, hl, i - 1, vcol, vcol + #raw_val)
+			-- Create a simple in_string(col) checker for rest of logic
+			local function in_string(col)
+				return first_quote and last_quote and col >= first_quote and col <= last_quote
+			end
+
+			-- Step 2: find first colon not in a string (key : value)
+			local colon_pos = nil
+			for pos in line:gmatch("():") do
+				if not in_string(pos) then
+					colon_pos = pos
+					break
 				end
+			end
 
-			--------------------------------------------------------------------------
-			-- 2) key ::
-			--------------------------------------------------------------------------
-			elseif line:match("^%s*%w+::%s*$") then
+			if colon_pos then
+				local key = line:sub(1, colon_pos - 1)
+				if key:match("%S") then
+					touched = true
+					local trimmed_key = trim(key)
+					local key_start = line:find(trimmed_key, 1, true)
+					local key_end = key_start + #trimmed_key
+					vim.api.nvim_buf_add_highlight(bufnr, ns, "F3CKey", i - 1, key_start - 1, key_end)
+
+					local raw_val = trim(line:sub(colon_pos + 1))
+					if #raw_val > 0 then
+						local hl = classify_value(raw_val)
+						local vcol = line:find(raw_val, colon_pos + 1, true) - 1
+						if not in_string(vcol + 1) then
+							vim.api.nvim_buf_add_highlight(bufnr, ns, hl, i - 1, vcol, vcol + #raw_val)
+						end
+					end
+				end
+			elseif line:match("^%s*%w+::%s*$") and not in_string(line:find("::")) then
 				touched = true
 				local s, e = line:find("^%s*%w+")
 				vim.api.nvim_buf_add_highlight(bufnr, ns, "F3CBlock", i - 1, s - 1, e)
-
-			--------------------------------------------------------------------------
-			-- 3) key :TERM:
-			--------------------------------------------------------------------------
-			elseif line:match("^%s*%w+:%w+:%s*$") then
+			elseif line:match("^%s*%w+:%w+:%s*$") and not in_string(line:find(":")) then
 				touched = true
 				local s, e = line:find("^%s*%w+")
 				vim.api.nvim_buf_add_highlight(bufnr, ns, "F3CSpec", i - 1, s - 1, e)
-
-			--------------------------------------------------------------------------
-			-- 4) :TERM:   (implicit key)
-			--------------------------------------------------------------------------
-			elseif line:match("^%s*:%w+:%s*$") then
+			elseif line:match("^%s*:%w+:%s*$") and not in_string(line:find(":")) then
 				touched = true
 				vim.api.nvim_buf_add_highlight(bufnr, ns, "F3CSpec", i - 1, 0, -1)
-
-			--------------------------------------------------------------------------
-			-- 5) *only* a value on the line  (new rule)
-			--------------------------------------------------------------------------
-			-- 5) *only* a value on the line  (new rule)
 			else
 				touched = false
 			end
 
-			-- punctuation (colons always, dots per rules)
+			-- punctuation (colons and dots), skipping inside strings
 			if line:find("[:%.]") then
-				highlight_punct(bufnr, i - 1, line)
+				for col in line:gmatch("()[:%.]") do
+					if not in_string(col) then
+						vim.api.nvim_buf_add_highlight(bufnr, ns, "F3CPunct", i - 1, col - 1, col)
+					end
+				end
 			end
 
-			-- whole‑line fallback
 			if not touched and trim(line) ~= "" then
 				vim.api.nvim_buf_add_highlight(bufnr, ns, "F3COther", i - 1, 0, -1)
 			end
